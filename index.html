@@ -2,10 +2,11 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="viewport" content="width=device-width, maximum-scale=1.0, user-scalable=no">
 <title>12-Note Player (Polyphonic)</title>
 <style>
   body {
+    padding: 50px;
     font-family: sans-serif;
     display: flex;
     justify-content: center;
@@ -13,15 +14,18 @@
     height: 100vh;
     background: #111;
     user-select: none;
-    -webkit-user-select: none;
-    -webkit-touch-callout: none;
-    touch-action: manipulation;
   }
 
-  .container {
+  .effect-buttons, .container {
     display: grid;
-    grid-template-columns: repeat(4, 80px);
+    grid-template-columns: repeat(4, auto);
     gap: 12px;
+    justify-content: center;
+  }
+
+  .effect-buttons {
+    grid-template-columns: repeat(4, auto);
+    margin-bottom: 20px;
   }
 
   button {
@@ -31,49 +35,92 @@
     border-radius: 12px;
     background: #444;
     color: white;
-    font-size: 18px;
+    font-size: 16px;
     cursor: pointer;
     transition: background 0.2s, transform 0.1s;
-    user-select: none;
-    -webkit-user-select: none;
-    -webkit-touch-callout: none;
-    touch-action: manipulation;
   }
 
   button.active {
     background: #2ecc71;
     transform: scale(0.95);
   }
+
+  #soundContainer {
+    margin-bottom: 20px;
+    grid-template-columns: repeat(4, 80px);
+  }
+
 </style>
 </head>
 <body>
 
-  <div>
-    <div class="container" id="soundContainer"></div>
-    <br>
-    <div class="container" id="buttons"></div>
+<div>
+  <div class="container" id="soundContainer"></div>
+  <div class="effect-buttons" id="effectButtons"></div>
+  <div class="container" id="buttons"></div>
 </div>
 
 <script>
   const sounds = ["sine", "triangle", "square", "sawtooth"];
-  const soundContainer = document.getElementById("soundContainer");
+  const effects = ["reverb", "distortion", "tremolo", "lowpass"];
 
-  // Create a button for sound type
+  const soundContainer = document.getElementById("soundContainer");
+  const effectContainer = document.getElementById("effectButtons");
+
+  const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  const convolver = audioCtx.createConvolver();
+
+  // --- Reverb impulse response
+  function createImpulseResponse(duration = 2, decay = 2) {
+    const rate = audioCtx.sampleRate;
+    const length = rate * duration;
+    const impulse = audioCtx.createBuffer(2, length, rate);
+    for (let i = 0; i < 2; i++) {
+      const channelData = impulse.getChannelData(i);
+      for (let j = 0; j < length; j++) {
+        channelData[j] = (Math.random() * 2 - 1) * Math.pow(1 - j / length, decay);
+      }
+    }
+    return impulse;
+  }
+  convolver.buffer = createImpulseResponse();
+
+  // Track the currently active effect
+  let activeEffect = "none";
+
+  // Create effect toggle buttons
+  effects.forEach(effect => {
+    const btn = document.createElement('button');
+    btn.textContent = effect;
+    effectContainer.appendChild(btn);
+
+    btn.addEventListener('pointerdown', () => {
+      // Toggle logic: deactivate all others, activate this one if not already active
+      if (activeEffect === effect) {
+        activeEffect = "none";
+        btn.classList.remove('active');
+      } else {
+        activeEffect = effect;
+        [...effectContainer.children].forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+      }
+    });
+  });
+
+  // Create sound type buttons
   sounds.forEach(sound => {
     const btn = document.createElement('button');
     btn.textContent = sound;
     soundContainer.appendChild(btn);
 
-    // Change the sound setting when new sound selected
-    btn.addEventListener('pointerdown', e => {
+    btn.addEventListener('pointerdown', () => {
       [...soundContainer.children].forEach(child => child.classList.remove('active'));
       localStorage.setItem('soundSelection', sound);
-      btn.classList.add('active')
+      btn.classList.add('active');
     });
-
   });
 
- const notes = [
+  const notes = [
   // Top row — Sharps/Flats
   { name: 'C♯', freq: 277.18, keystroke: 'w' },
   { name: 'D♯', freq: 311.13, keystroke: 'e' },
@@ -109,78 +156,97 @@
 ];
 
   const container = document.getElementById('buttons');
-  const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
   const activeOscillators = new Map();
 
-  // Play note
-
-  const playNote = (noteName, noteFrequency, noteKeystroke) => {
-    if (activeOscillators.has(noteName)) return; // already playing
+  function playNote(noteName, freq) {
+    if (activeOscillators.has(noteName)) return;
     const osc = audioCtx.createOscillator();
     const gain = audioCtx.createGain();
-    osc.type = localStorage.getItem('soundSelection');
-    osc.frequency.value = noteFrequency;
-    osc.connect(gain);
-    gain.connect(audioCtx.destination);
+    osc.type = localStorage.getItem('soundSelection') || 'sine';
+    osc.frequency.value = freq;
+    let output = gain;
+
+    // --- Effects
+    if (activeEffect === 'reverb') {
+      osc.connect(gain);
+      gain.connect(convolver);
+      convolver.connect(audioCtx.destination);
+    }
+    else if (activeEffect === 'distortion') {
+      const distortion = audioCtx.createWaveShaper();
+      const curve = new Float32Array(44100);
+      for (let i = 0; i < 44100; i++) {
+        const x = (i * 2) / 44100 - 1;
+        curve[i] = Math.tanh(3 * x);
+      }
+      distortion.curve = curve;
+      osc.connect(distortion);
+      distortion.connect(gain);
+      gain.connect(audioCtx.destination);
+    }
+    else if (activeEffect === 'tremolo') {
+      const tremGain = audioCtx.createGain();
+      const lfo = audioCtx.createOscillator();
+      const depth = audioCtx.createGain();
+      lfo.frequency.value = 5;
+      depth.gain.value = 0.5;
+      lfo.connect(depth).connect(tremGain.gain);
+      lfo.start();
+      osc.connect(tremGain);
+      tremGain.connect(gain);
+      gain.connect(audioCtx.destination);
+    }
+    else if (activeEffect === 'lowpass') {
+      const filter = audioCtx.createBiquadFilter();
+      filter.type = 'lowpass';
+      filter.frequency.value = 800;
+      osc.connect(filter);
+      filter.connect(gain);
+      gain.connect(audioCtx.destination);
+    }
+    else {
+      osc.connect(gain);
+      gain.connect(audioCtx.destination);
+    }
+
     gain.gain.setValueAtTime(0.3, audioCtx.currentTime);
     osc.start();
     activeOscillators.set(noteName, { osc, gain });
   }
 
-  // Create a button for each note
-  notes.forEach(note => {
-    const btn = document.createElement('button');
-    btn.textContent = note.name;
-    container.appendChild(btn);
-
-    // Start the note when note button is pressed
-    btn.addEventListener('pointerdown', e => {
-      playNote(note.name, note.freq, note.keystroke);
-      btn.classList.add('active');
-    });
-
-    // Stop the note when note button is released
-    btn.addEventListener('pointerup', e => stopNote(note.name, btn));
-    btn.addEventListener('pointerleave', e => stopNote(note.name, btn));
-    btn.addEventListener('pointercancel', e => stopNote(note.name, btn));
-
-    // Start note when note keystroke is pressed
-    document.addEventListener('keydown', (event) => {
-      if (note.keystroke.includes(event.key)) {
-        playNote(note.name, note.freq, note.keystroke);
-        btn.classList.add('active');
-      }
-    });
-    
-    // Stop note when note keystroke is released
-   document.addEventListener('keyup', (event) => {
-      if (note.keystroke.includes(event.key)) {
-        stopNote(note.name, btn);
-      }
-    });
-
-  });
-
-  
-
-  function stopNote(name, btn) {
-    const data = activeOscillators.get(name);
+  function stopNote(noteName, btn) {
+    const data = activeOscillators.get(noteName);
     if (data) {
       const { osc, gain } = data;
       gain.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + 0.1);
       osc.stop(audioCtx.currentTime + 0.1);
-      activeOscillators.delete(name);
-      btn.classList.remove('active');
+      activeOscillators.delete(noteName);
+      if (btn) btn.classList.remove('active');
     }
   }
 
-  // Resume audio context on first user interaction (required by browsers)
+  // --- Create note buttons ---
+  notes.forEach(note => {
+    const btn = document.createElement('button');
+    btn.textContent = note.name;
+    container.appendChild(btn);
+    btn.addEventListener('pointerdown', () => { playNote(note.name, note.freq); btn.classList.add('active'); });
+    btn.addEventListener('pointerup', () => stopNote(note.name, btn));
+    btn.addEventListener('pointerleave', () => stopNote(note.name, btn));
+    btn.addEventListener('pointercancel', () => stopNote(note.name, btn));
+
+    document.addEventListener('keydown', e => {
+      if (e.key === note.keystroke) { playNote(note.name, note.freq); btn.classList.add('active'); }
+    });
+    document.addEventListener('keyup', e => {
+      if (e.key === note.keystroke) stopNote(note.name, btn);
+    });
+  });
+
+  // resume audio context
   document.body.addEventListener('click', () => {
-    if (audioCtx.state === 'suspended') {
-      audioCtx.resume();
-    }
+    if (audioCtx.state === 'suspended') audioCtx.resume();
   }, { once: true });
 </script>
-
 </body>
 </html>
